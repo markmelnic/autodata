@@ -18,17 +18,6 @@ class LinksEnum(enum.Enum):
     base = "https://www.autoevolution.com/cars/"
 
 
-class Timeouts:
-    def srt() -> None:
-        time.sleep(random.random() + random.randint(0, 2))
-
-    def med() -> None:
-        time.sleep(random.random() + random.randint(2, 5))
-
-    def lng() -> None:
-        time.sleep(random.random() + random.randint(5, 10))
-
-
 class AEVS:
     def __init__(self):
         chrome_options = webdriver.ChromeOptions()
