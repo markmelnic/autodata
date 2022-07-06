@@ -74,9 +74,12 @@ class AEVS:
 
     def _scrape_make(self, link: str):
         while self._break:
-            self.dv.get(link)
-
             try:
+                self.dv.get(link)
+                WebDriverWait(self.dv, 15).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "carmod"))
+                )
+
                 _el_models = self.dv.find_elements(By.CLASS_NAME, "carmod")
                 models = [m.find_element(By.TAG_NAME, "a") for m in _el_models]
                 models = [(
@@ -104,9 +107,12 @@ class AEVS:
 
     def _scrape_model(self, link: str):
         while self._break:
-            self.dv.get(link)
-
             try:
+                self.dv.get(link)
+                WebDriverWait(self.dv, 15).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "carmodel"))
+                )
+
                 _el_generations = self.dv.find_elements(By.CLASS_NAME, "carmodel")
                 generations = [m.find_element(By.TAG_NAME, "a") for m in _el_generations]
                 generations = [(
@@ -127,7 +133,7 @@ class AEVS:
 
         for i, gen in enumerate(generations):
             self._current_generation = f'{gen[0]} {gen[2]}'
-            if self._current_generation in self.indexed[self._current_make][self._current_model]:
+            if self._current_generation in self.indexed[self._current_make][self._current_model].keys():
                 continue
 
             self.indexed[self._current_make][self._current_model][self._current_generation] = {}
@@ -141,20 +147,21 @@ class AEVS:
                 logging.info(f'         {self._current_variant}')
                 self._scrape_variant(variant[1])
 
+            self._write_json()
+
 
     def _scrape_variant(self, link: str):
         while self._break:
-            self.dv.get(link)
-
             try:
-                self.dv.refresh()
-                self._break = False
-            except WebDriverException:
+                self.dv.get(link)
                 time.sleep(3)
-        self._break = True
 
-        while self._break:
-            try:
+                self.dv.refresh()
+                time.sleep(3)
+                WebDriverWait(self.dv, 15).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "techdata"))
+                )
+
                 variant = {}
                 variant['engine'] = self._current_variant
                 specs = self.dv.find_elements(By.CLASS_NAME, "techdata")
