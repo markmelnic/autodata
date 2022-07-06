@@ -1,10 +1,8 @@
 import logging
-from typing import final
 logging.basicConfig(level=logging.INFO, format="%(asctime)s: %(message)s")
 
 
 import os, enum, json, time
-from matplotlib.pyplot import text
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
