@@ -9,6 +9,9 @@ if __name__ == "__main__":
 
     # scraper._dispose()
 
-    scraper = AD_NET()
+    scraper = AD_NET(
+        'autodata-extended-full.json',
+        True
+    )
 
     scraper.scrape()

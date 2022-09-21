@@ -16,21 +16,21 @@ class LinksEnum(enum.Enum):
 
 
 class AD_NET:
-    def __init__(self):
-        if 'autodata-extended-full.json' in os.listdir():
-            with open('autodata-extended-full.json', 'r') as f:
-                self.indexed = json.load(f)
-        else:
-            self.indexed = {}
-
+    def __init__(self, output_file: str = 'output.json', skip_existing: bool = False):
         self._current_make = None
         self._current_model = None
         self._current_generation = None
         self._current_variant = None
 
-        self.skip_existing = True
+        self.skip_existing = skip_existing
+        self._output_file = output_file
         self._break = None
 
+        if self._output_file in os.listdir():
+            with open(self._output_file, 'r') as f:
+                self.indexed = json.load(f)
+        else:
+            self.indexed = {}
 
     def scrape(self, ):
         soup = BS4(get(LinksEnum.entry.value).text, 'html.parser')
@@ -283,5 +283,5 @@ class AD_NET:
 
 
     def _write_json(self, ):
-        with open('autodata-extended-full.json', 'w') as f:
+        with open(self._output_file, 'w') as f:
             json.dump(self.indexed, f, indent=2)
