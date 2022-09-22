@@ -16,13 +16,20 @@ class LinksEnum(enum.Enum):
 
 
 class AD_NET:
-    def __init__(self, output_file: str = 'output.json', skip_existing: bool = False):
+    def __init__(
+            self,
+            output_file: str = 'output.json',
+            skip_existing: bool = False,
+            only_include_makes: list = [],
+        ):
+
         self._current_make = None
         self._current_model = None
         self._current_generation = None
         self._current_variant = None
 
         self.skip_existing = skip_existing
+        self._only_include_makes = only_include_makes
         self._output_file = output_file
         self._break = None
 
@@ -43,17 +50,18 @@ class AD_NET:
 
         for i, car in enumerate(cars):
             self._current_make = car[0]
-            logging.info(f'Scraping [{i+1}/{len(cars)}] {self._current_make}')
 
             if self.skip_existing and self._current_make in self.indexed:
                 continue
+            elif self._only_include_makes and self._current_make not in self._only_include_makes:
+                continue
             else:
+                logging.info(f'Scraping [{i+1}/{len(cars)}] {self._current_make}')
                 self.indexed[self._current_make] = {}
 
                 self._scrape_make(LinksEnum.base.value+car[1])
 
                 self._write_json()
-
 
     def _scrape_make(self, link: str):
         soup = BS4(get(link).text, 'html.parser')
@@ -144,10 +152,10 @@ class AD_NET:
                 specs['body_type'] = value
 
             elif 'seats' in key:
-                specs['seats_count'] = int(value.strip(' ')[0])
+                specs['seats_count'] = int(value.split('-')[0].split('/')[0].strip(' '))
 
-            elif 'Doors' in key:
-                specs['doors_count'] = int(value)
+            elif 'doors' in key:
+                specs['doors_count'] = int(value.split('-')[0].split('/')[0].strip('<').strip('>'))
 
             elif 'powertrain architecture' in key:
                 specs['powertrain_architecture'] = value
@@ -174,7 +182,7 @@ class AD_NET:
                         specs['fuel_consumption']['extra_urban'] = float(consumption)
 
             elif 'acceleration 0 - 100 km/h' in key:
-                acceleration = value[:-5].strip('<').strip('>').split('-')[0].replace('..', '.')
+                acceleration = value[:-5].strip('<').strip('>').split('-')[0].replace('..', '.').split(',')[0]
                 if acceleration[-1] == '.':
                     acceleration = acceleration[:-1]
                 if len(acceleration) >= 3:
@@ -220,7 +228,7 @@ class AD_NET:
                 elif 'Rear' in value:
                     specs['traction'] = 'rear'
                 elif 'All wheel drive' in value:
-                    specs['traction'] = 'all'
+                    specs['traction'] = '4wd'
 
         # phase 2
         if not 'power' in specs or not specs['power']:
