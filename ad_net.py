@@ -176,10 +176,10 @@ class AD_NET:
                         consumption = consumption[:3]
                     if 'combined' in key:
                         specs['fuel_consumption']['combined'] = float(consumption)
-                    elif 'urban' in key:
-                        specs['fuel_consumption']['urban'] = float(consumption)
                     elif 'extra urban' in key:
                         specs['fuel_consumption']['extra_urban'] = float(consumption)
+                    elif 'urban' in key:
+                        specs['fuel_consumption']['urban'] = float(consumption)
 
             elif 'acceleration 0 - 100 km/h' in key:
                 acceleration = value[:-5].strip('<').strip('>').split('-')[0].replace('..', '.').split(',')[0]
@@ -256,7 +256,7 @@ class AD_NET:
             body_type = specs['body_type'].lower()
             if 'crossover' in body_type or 'cuv' in body_type:
                 specs['body_type'] = 'crossover'
-            elif 'suv' in body_type or 'mpv' in body_type or 'sav' in body_type or 'off-road' in body_type:
+            elif 'suv' in body_type or 'mpv' in body_type or 'sav' in body_type or 'sac' in body_type or 'off-road' in body_type:
                 specs['body_type'] = 'suv'
             elif 'coupe' in body_type:
                 specs['body_type'] = 'coupe'

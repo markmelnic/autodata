@@ -67,15 +67,15 @@ if __name__ == "__main__":
         "Volvo",
     ]
 
-    # scraper = AD_NET(
-    #     'last-autodata-extended-full.json',
-    #     True,
-    # )
-
     scraper = AD_NET(
-        'last-autodata-extended.json',
+        'last-autodata-extended-full.json',
         True,
-        only_include_makes=only_include_makes
     )
+
+    # scraper = AD_NET(
+    #     'last-autodata-extended.json',
+    #     True,
+    #     only_include_makes=only_include_makes
+    # )
 
     scraper.scrape()
