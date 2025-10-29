@@ -185,10 +185,9 @@ class ADNET:
                     specs['fuel_type'] = 'diesel'
 
             elif 'fuel consumption' in key:
-                if not 'fuel_consumption' in specs:
-                    specs['fuel_consumption'] = {}
-
                 if not 'kg/100 km' in value:
+                    if not 'fuel_consumption' in specs:
+                        specs['fuel_consumption'] = {}
                     consumption = value.split(' l/100')[0].split('-')[0].replace('..', '.')
                     if len(consumption) >= 3:
                         consumption = consumption[:3]
@@ -345,7 +344,8 @@ class ADNET:
                 specs['body_type'] = 'other'
 
         for k, v in specs.items():
-            self.indexed[self._current_make][self._current_model][self._current_generation][self._current_variant]['specs'][k] = v
+            if v is not None and v != 'null':
+                self.indexed[self._current_make][self._current_model][self._current_generation][self._current_variant]['specs'][k] = v
 
 
     def _write_json(self, ):
