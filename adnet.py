@@ -39,6 +39,7 @@ class ADNET:
         else:
             self.indexed = {}
 
+
     def scrape(self, ):
         soup = BS4(get(LinksEnum.entry.value).text, 'html.parser')
 
@@ -63,8 +64,19 @@ class ADNET:
 
                 self._write_json()
 
+
+    def _get_soup(self, link: str):
+        try:
+            soup = BS4(get(link).text, 'html.parser')
+            return soup
+        except Exception as e:
+            logging.error(f'Error while fetching {link}: {e}')
+            return None
+
     def _scrape_make(self, link: str):
-        soup = BS4(get(link).text, 'html.parser')
+        soup = self._get_soup(link)
+        if not soup:
+            return
 
         _el_models = soup.find_all(class_='modeli')
         models = [(
@@ -82,7 +94,9 @@ class ADNET:
 
 
     def _scrape_model(self, link: str):
-        soup = BS4(get(link).text, 'html.parser')
+        soup = self._get_soup(link)
+        if not soup:
+            return
 
         table = soup.find(class_='generr')
         _el_generations = table.find_all(class_=lambda c: c and any(x in c for x in ['lgreen', 'lred']))
@@ -108,7 +122,9 @@ class ADNET:
 
 
     def _scrape_generation(self, link: str):
-        soup = BS4(get(link).text, 'html.parser')
+        soup = self._get_soup(link)
+        if not soup:
+            return
 
         table = soup.find(class_='carlist')
         _el_variants = table.find_all(class_=lambda c: c and any(x in c for x in ['lgreen', 'lred']))
@@ -134,7 +150,9 @@ class ADNET:
 
 
     def _scrape_variant(self, link: str):
-        soup = BS4(get(link).text, 'html.parser')
+        soup = self._get_soup(link)
+        if not soup:
+            return
 
         # phase 1
         table = soup.find(class_='cardetailsout')
@@ -189,6 +207,9 @@ class ADNET:
                     acceleration = acceleration[:3]
                 specs['acceleration'] = float(acceleration)
 
+            elif 'maximum speed' in key:
+                specs['max_speed'] = int(value.split(' km/h')[0].split('-')[0].split('/')[-1].split(' ')[0])
+
             elif 'fuel tank capacity' in key:
                 fuel_tank_capacity = value.split(' l')[0].split(' (optional')[0].split(' ')[0].split('-')[0]
                 if '+' in fuel_tank_capacity:
@@ -198,7 +219,13 @@ class ADNET:
             elif 'gross battery capacity' in key:
                 specs['battery_capacity'] = float(value[:-4].split('-')[0])
 
-            elif 'all-electric range' in key:
+            elif 'battery technology' in key:
+                specs['battery_tech'] = value
+
+            elif 'average energy consumption' in key:
+                specs['electric_consumption'] = float(value.split(' kWh')[0].split('-')[0])
+
+            elif 'electric range' in key:
                 specs['electric_range'] = float(value.split(' km')[0].split('-')[0].strip('<').strip('>'))
 
             elif 'system power' in key:
@@ -206,6 +233,9 @@ class ADNET:
                 if '+' in power:
                     power = sum([int(p) for p in power.split('+')])
                 specs['power'] = int(power)
+
+            elif 'system torque' in key:
+                specs['torque'] = int(value.split(' ')[0])
 
             elif 'emission standard' in key:
                 specs['emission_standard'] = value[:-1]
@@ -216,11 +246,14 @@ class ADNET:
             elif 'power' == key.strip(' '):
                 power_no_system = int(value.split(' Hp ')[0])
 
-            elif 'number of gears' in key:
-                if 'automatic' in key:
+            elif 'number of gears' in key or 'type of gearbox' in key:
+                if 'automatic' in value:
                     specs['transmission'] = 'automatic'
-                elif 'manual' in key:
+                elif 'manual' in value:
                     specs['transmission'] = 'manual'
+
+                if 'gears' in value:
+                    specs['gears'] = value.split(' gears')[0]
 
             elif 'drive wheel' in key:
                 if 'Front' in value:
@@ -229,6 +262,27 @@ class ADNET:
                     specs['traction'] = 'rear'
                 elif 'All wheel drive' in value:
                     specs['traction'] = '4wd'
+
+            elif 'kerb weight' in key:
+                specs['weight'] = int(float(value.split(' kg')[0].split('-')[0].split('/')[-1]))
+
+            elif 'length' == key.strip(' '):
+                specs['length'] = int(float(value.split(' mm')[0].split('-')[0].split('/')[-1]))
+
+            elif 'width' == key.strip(' '):
+                specs['width'] = int(float(value.split(' mm')[0].split('-')[0].split('/')[-1]))
+
+            elif 'height' == key.strip(' '):
+                specs['height'] = int(float(value.split(' mm')[0].split('-')[0].split('/')[-1]))
+
+            elif 'wheelbase' == key.strip(' '):
+                specs['wheelbase'] = int(float(value.split(' mm')[0].split('-')[0].split('/')[-1]))
+
+            elif 'clearance' in key:
+                specs['clearance'] = int(float(value.split(' mm')[0].split('-')[0].split('/')[-1]))
+
+            elif 'tires' in key:
+                specs['tires'] = value.split('; ')
 
         # phase 2
         if not 'power' in specs or not specs['power']:
