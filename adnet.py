@@ -1,17 +1,32 @@
-import logging
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s: %(message)s")
-
-
 import enum
 import json
+import logging
 import os
+import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
 from bs4 import BeautifulSoup as BS4
-from requests import get
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 CURRENT_YEAR = int(time.strftime("%Y"))
+REQUEST_TIMEOUT = 30
+REQUEST_DELAY = 0.5
+
+SESSION = requests.Session()
+SESSION.headers.update(
+    {"User-Agent": "Mozilla/5.0 (compatible; AutoDataScraper/1.0)"}
+)
+_retry = Retry(total=3, backoff_factor=1.0, status_forcelist=[500, 502, 503, 504])
+SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
+SESSION.mount("http://", HTTPAdapter(max_retries=_retry))
+
+
+def _css_contains(*names):
+    return lambda c: c and any(x in c for x in names)
 
 
 class LinksEnum(enum.Enum):
@@ -24,29 +39,25 @@ class ADNET:
         self,
         output_file: str = "output.json",
         skip_existing: bool = False,
-        only_include_makes: list = [],
+        only_include_makes: list | None = None,
+        max_workers: int = 4,
     ):
-
-        self._current_make = None
-        self._current_model = None
-        self._current_generation = None
-        self._current_variant = None
-
         self.skip_existing = skip_existing
-        self._only_include_makes = only_include_makes
+        self._only_include_makes = only_include_makes or []
         self._output_file = output_file
-        self._break = None
+        self._max_workers = max_workers
+        self._lock = threading.Lock()
 
-        if self._output_file in os.listdir():
+        if os.path.exists(self._output_file):
             with open(self._output_file, "r") as f:
                 self.indexed = json.load(f)
         else:
             self.indexed = {}
 
-    def scrape(
-        self,
-    ):
-        soup = BS4(get(LinksEnum.entry.value).text, "html.parser")
+    def scrape(self):
+        soup = self._get_soup(LinksEnum.entry.value)
+        if not soup:
+            return
 
         _el_cars = soup.find_all(class_="marki_blok")
         cars = [
@@ -58,32 +69,61 @@ class ADNET:
         ]
 
         for i, car in enumerate(cars):
-            self._current_make = car[0]
+            make_name = car[0]
 
-            if self.skip_existing and self._current_make in self.indexed:
+            if self.skip_existing and make_name in self.indexed:
                 continue
             elif (
                 self._only_include_makes
-                and self._current_make not in self._only_include_makes
+                and make_name not in self._only_include_makes
             ):
                 continue
             else:
-                logging.info(f"Scraping [{i + 1}/{len(cars)}] {self._current_make}")
-                self.indexed[self._current_make] = {}
+                logging.info(f"Scraping [{i + 1}/{len(cars)}] {make_name}")
+                self.indexed[make_name] = {}
 
-                self._scrape_make(LinksEnum.base.value + car[1])
+                self._scrape_make(make_name, LinksEnum.base.value + car[1])
 
                 self._write_json()
 
     def _get_soup(self, link: str):
         try:
-            soup = BS4(get(link).text, "html.parser")
-            return soup
+            time.sleep(REQUEST_DELAY)
+            resp = SESSION.get(link, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            return BS4(resp.text, "html.parser")
         except Exception as e:
             logging.error(f"Error while fetching {link}: {e}")
             return None
 
-    def _scrape_make(self, link: str):
+    @staticmethod
+    def _parse_year_range(text: str) -> tuple:
+        parts = text.split(" - ")
+        try:
+            from_year = int(parts[0])
+        except (ValueError, IndexError):
+            from_year = None
+        try:
+            to_year = int(parts[1]) if len(parts) > 1 and parts[1] else CURRENT_YEAR
+        except (ValueError, IndexError):
+            to_year = CURRENT_YEAR
+        return from_year, to_year
+
+    @staticmethod
+    def _parse_mm(value: str):
+        try:
+            return int(float(value.split(" mm")[0].split("-")[0].split("/")[-1]))
+        except (ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _clean_numeric(text: str) -> str:
+        text = text.replace("..", ".").strip()
+        if text.endswith("."):
+            text = text[:-1]
+        return text
+
+    def _scrape_make(self, make_name: str, link: str):
         soup = self._get_soup(link)
         if not soup:
             return
@@ -97,272 +137,289 @@ class ADNET:
             for m in _el_models
         ]
 
-        for i, model in enumerate(models):
-            self._current_model = model[0]
-            logging.info(f"   [{i + 1}/{len(models)}] {self._current_model}")
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = {}
+            for i, model in enumerate(models):
+                model_name = model[0]
+                logging.info(f"   [{i + 1}/{len(models)}] {model_name}")
+                with self._lock:
+                    self.indexed[make_name][model_name] = {}
+                future = executor.submit(
+                    self._scrape_model,
+                    make_name,
+                    model_name,
+                    LinksEnum.base.value + model[1],
+                )
+                futures[future] = model_name
 
-            self.indexed[self._current_make][self._current_model] = {}
+            for future in as_completed(futures):
+                model_name = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logging.error(f"Error scraping model {model_name}: {e}")
 
-            self._scrape_model(LinksEnum.base.value + model[1])
-
-    def _scrape_model(self, link: str):
+    def _scrape_model(self, make_name: str, model_name: str, link: str):
         soup = self._get_soup(link)
         if not soup:
             return
 
         table = soup.find(class_="generr")
-        _el_generations = table.find_all(
-            class_=lambda c: c and any(x in c for x in ["lgreen", "lred"])
-        )
+        if table is None:
+            logging.warning(f"No generations table found at {link}")
+            return
+
+        _el_generations = table.find_all(class_=_css_contains("lgreen", "lred"))
         _el_generations = [
             g
             for g in _el_generations
-            if g.find(class_=lambda c: c and any(x in c for x in ["cur", "end"]))
-            is not None
+            if g.find(class_=_css_contains("cur", "end")) is not None
         ]
         generations = [
             (
                 g.find("strong").text,
-                g.find(class_=lambda c: c and any(x in c for x in ["cur", "end"])).text,
+                g.find(class_=_css_contains("cur", "end")).text,
                 g.find("a").get("href"),
             )
             for g in _el_generations
         ]
 
         for i, generation in enumerate(generations):
-            self._current_generation = generation[0]
+            gen_name = generation[0]
             logging.info(
-                f"      [{i + 1}/{len(generations)}] {self._current_generation}"
+                f"      [{i + 1}/{len(generations)}] {gen_name}"
             )
 
-            self.indexed[self._current_make][self._current_model][
-                self._current_generation
-            ] = {}
+            from_year, to_year = self._parse_year_range(generation[1])
+            gen_data = {"from": from_year, "to": to_year}
 
-            fromto = generation[1].split(" - ")
-            self.indexed[self._current_make][self._current_model][
-                self._current_generation
-            ]["from"] = int(fromto[0])
-            self.indexed[self._current_make][self._current_model][
-                self._current_generation
-            ]["to"] = int(fromto[1]) if fromto[1] else CURRENT_YEAR
+            with self._lock:
+                self.indexed[make_name][model_name][gen_name] = gen_data
 
-            self._scrape_generation(LinksEnum.base.value + generation[2])
+            self._scrape_generation(
+                make_name, model_name, gen_name,
+                LinksEnum.base.value + generation[2],
+            )
 
-    def _scrape_generation(self, link: str):
+    def _scrape_generation(
+        self, make_name: str, model_name: str, gen_name: str, link: str
+    ):
         soup = self._get_soup(link)
         if not soup:
             return
 
         table = soup.find(class_="carlist")
-        _el_variants = table.find_all(
-            class_=lambda c: c and any(x in c for x in ["lgreen", "lred"])
-        )
+        if table is None:
+            logging.warning(f"No variants table found at {link}")
+            return
+
+        _el_variants = table.find_all(class_=_css_contains("lgreen", "lred"))
         variants = [
             (
                 g.find(class_="tit").text,
-                g.find(class_=lambda c: c and any(x in c for x in ["cur", "end"])).text,
+                g.find(class_=_css_contains("cur", "end")).text,
                 g.find("a").get("href"),
             )
             for g in _el_variants
         ]
 
         for i, variant in enumerate(variants):
-            self._current_variant = variant[0]
+            variant_name = variant[0]
 
-            self.indexed[self._current_make][self._current_model][
-                self._current_generation
-            ][self._current_variant] = {}
+            from_year, to_year = self._parse_year_range(variant[1])
+            with self._lock:
+                self.indexed[make_name][model_name][gen_name][variant_name] = {
+                    "from": from_year,
+                    "to": to_year,
+                    "specs": {},
+                }
 
-            fromto = variant[1].split(" - ")
-            self.indexed[self._current_make][self._current_model][
-                self._current_generation
-            ][self._current_variant]["from"] = int(fromto[0])
-            self.indexed[self._current_make][self._current_model][
-                self._current_generation
-            ][self._current_variant]["to"] = (
-                int(fromto[1]) if fromto[1] else CURRENT_YEAR
+            logging.info(f"         [{i + 1}/{len(variants)}] {variant_name}")
+
+            self._scrape_variant(
+                make_name, model_name, gen_name, variant_name,
+                LinksEnum.base.value + variant[2],
             )
-            self.indexed[self._current_make][self._current_model][
-                self._current_generation
-            ][self._current_variant]["specs"] = {}
 
-            logging.info(f"         [{i + 1}/{len(variants)}] {self._current_variant}")
-
-            self._scrape_variant(LinksEnum.base.value + variant[2])
-
-    def _scrape_variant(self, link: str):
+    def _scrape_variant(
+        self,
+        make_name: str,
+        model_name: str,
+        gen_name: str,
+        variant_name: str,
+        link: str,
+    ):
         soup = self._get_soup(link)
         if not soup:
             return
 
-        # phase 1
         table = soup.find(class_="cardetailsout")
+        if table is None:
+            logging.warning(f"No specs table found at {link}")
+            return
+
         specs = {}
         power_no_system = 0
         for row in table.find_all("tr"):
-            key = row.find("th").text.lower()
-            value = row.find("td", recursive=False)
-            if value:
-                value = value.text
-            else:
+            try:
+                key = row.find("th").text.lower()
+                value = row.find("td", recursive=False)
+                if value:
+                    value = value.text
+                else:
+                    continue
+
+                if "body type" in key:
+                    specs["body_type"] = value
+
+                elif "seats" in key:
+                    specs["seats_count"] = int(
+                        value.split("-")[0].split("/")[0].strip(" ")
+                    )
+
+                elif "doors" in key:
+                    specs["doors_count"] = int(
+                        value.split("-")[0].split("/")[0].strip("<").strip(">")
+                    )
+
+                elif "powertrain architecture" in key:
+                    specs["powertrain_architecture"] = value
+
+                elif "fuel type" in key:
+                    if "gasoline" in value.lower() or "petrol" in value.lower():
+                        specs["fuel_type"] = "gasoline"
+                    elif "diesel" in value.lower():
+                        specs["fuel_type"] = "diesel"
+
+                elif "fuel consumption" in key:
+                    if "kg/100 km" not in value:
+                        if "fuel_consumption" not in specs:
+                            specs["fuel_consumption"] = {}
+                        consumption = self._clean_numeric(
+                            value.split(" l/100")[0].split("-")[0]
+                        )
+                        if "combined" in key:
+                            specs["fuel_consumption"]["combined"] = float(consumption)
+                        elif "extra urban" in key:
+                            specs["fuel_consumption"]["extra_urban"] = float(
+                                consumption
+                            )
+                        elif "urban" in key:
+                            specs["fuel_consumption"]["urban"] = float(consumption)
+
+                elif "acceleration 0 - 100 km/h" in key:
+                    acceleration = self._clean_numeric(
+                        value[:-5]
+                        .strip("<")
+                        .strip(">")
+                        .split("-")[0]
+                        .split(",")[0]
+                    )
+                    specs["acceleration"] = float(acceleration)
+
+                elif "maximum speed" in key:
+                    specs["max_speed"] = int(
+                        value.split(" km/h")[0]
+                        .split("-")[0]
+                        .split("/")[-1]
+                        .split(" ")[0]
+                    )
+
+                elif "fuel tank capacity" in key:
+                    fuel_tank_capacity = (
+                        value.split(" l")[0]
+                        .split(" (optional")[0]
+                        .split(" ")[0]
+                        .split("-")[0]
+                    )
+                    if "+" in fuel_tank_capacity:
+                        fuel_tank_capacity = sum(
+                            [float(f) for f in fuel_tank_capacity.split("+")]
+                        )
+                    specs["fuel_tank_capacity"] = float(fuel_tank_capacity)
+
+                elif "gross battery capacity" in key:
+                    specs["battery_capacity"] = float(value[:-4].split("-")[0])
+
+                elif "battery technology" in key:
+                    specs["battery_tech"] = value
+
+                elif "average energy consumption" in key:
+                    specs["electric_consumption"] = float(
+                        value.split(" kWh")[0].split("-")[0]
+                    )
+
+                elif "electric range" in key:
+                    specs["electric_range"] = float(
+                        value.split(" km")[0].split("-")[0].strip("<").strip(">")
+                    )
+
+                elif "system power" in key:
+                    power = value.split(" Hp")[0]
+                    if "+" in power:
+                        power = sum([int(p) for p in power.split("+")])
+                    specs["power"] = int(power)
+
+                elif "system torque" in key:
+                    specs["torque"] = int(value.split(" ")[0])
+
+                elif "emission standard" in key:
+                    specs["emission_standard"] = value.strip()
+
+                elif "engine displacement" in key:
+                    specs["displacement"] = int(value.split(" cm3")[0])
+
+                elif "power" == key.strip(" "):
+                    power_no_system = int(value.split(" Hp ")[0])
+
+                elif "number of gears" in key or "type of gearbox" in key:
+                    if "automatic" in value:
+                        specs["transmission"] = "automatic"
+                    elif "manual" in value:
+                        specs["transmission"] = "manual"
+
+                    if "gears" in value:
+                        specs["gears"] = int(value.split(" gears")[0])
+
+                elif "drive wheel" in key:
+                    if "Front" in value:
+                        specs["traction"] = "front"
+                    elif "Rear" in value:
+                        specs["traction"] = "rear"
+                    elif "All wheel drive" in value:
+                        specs["traction"] = "4wd"
+
+                elif "kerb weight" in key:
+                    specs["weight"] = int(
+                        float(value.split(" kg")[0].split("-")[0].split("/")[-1])
+                    )
+
+                elif "length" == key.strip(" "):
+                    specs["length"] = self._parse_mm(value)
+
+                elif "width" == key.strip(" "):
+                    specs["width"] = self._parse_mm(value)
+
+                elif "height" == key.strip(" "):
+                    specs["height"] = self._parse_mm(value)
+
+                elif "wheelbase" == key.strip(" "):
+                    specs["wheelbase"] = self._parse_mm(value)
+
+                elif "clearance" in key:
+                    specs["clearance"] = self._parse_mm(value)
+
+                elif "tires" in key:
+                    specs["tires"] = value.split("; ")
+
+            except (ValueError, IndexError, TypeError, AttributeError) as e:
+                logging.warning(
+                    f"Failed to parse spec '{key}' with value '{value}': {e}"
+                )
                 continue
 
-            if "body type" in key:
-                specs["body_type"] = value
-
-            elif "seats" in key:
-                specs["seats_count"] = int(value.split("-")[0].split("/")[0].strip(" "))
-
-            elif "doors" in key:
-                specs["doors_count"] = int(
-                    value.split("-")[0].split("/")[0].strip("<").strip(">")
-                )
-
-            elif "powertrain architecture" in key:
-                specs["powertrain_architecture"] = value
-
-            elif "fuel type" in key:
-                if "gasoline" in value.lower() or "petrol" in value.lower():
-                    specs["fuel_type"] = "gasoline"
-                elif "diesel" in value.lower():
-                    specs["fuel_type"] = "diesel"
-
-            elif "fuel consumption" in key:
-                if not "kg/100 km" in value:
-                    if not "fuel_consumption" in specs:
-                        specs["fuel_consumption"] = {}
-                    consumption = (
-                        value.split(" l/100")[0].split("-")[0].replace("..", ".")
-                    )
-                    if len(consumption) >= 3:
-                        consumption = consumption[:3]
-                    if "combined" in key:
-                        specs["fuel_consumption"]["combined"] = float(consumption)
-                    elif "extra urban" in key:
-                        specs["fuel_consumption"]["extra_urban"] = float(consumption)
-                    elif "urban" in key:
-                        specs["fuel_consumption"]["urban"] = float(consumption)
-
-            elif "acceleration 0 - 100 km/h" in key:
-                acceleration = (
-                    value[:-5]
-                    .strip("<")
-                    .strip(">")
-                    .split("-")[0]
-                    .replace("..", ".")
-                    .split(",")[0]
-                )
-                if acceleration[-1] == ".":
-                    acceleration = acceleration[:-1]
-                if len(acceleration) >= 3:
-                    acceleration = acceleration[:3]
-                specs["acceleration"] = float(acceleration)
-
-            elif "maximum speed" in key:
-                specs["max_speed"] = int(
-                    value.split(" km/h")[0].split("-")[0].split("/")[-1].split(" ")[0]
-                )
-
-            elif "fuel tank capacity" in key:
-                fuel_tank_capacity = (
-                    value.split(" l")[0]
-                    .split(" (optional")[0]
-                    .split(" ")[0]
-                    .split("-")[0]
-                )
-                if "+" in fuel_tank_capacity:
-                    fuel_tank_capacity = sum(
-                        [float(f) for f in fuel_tank_capacity.split("+")]
-                    )
-                specs["fuel_tank_capacity"] = float(fuel_tank_capacity)
-
-            elif "gross battery capacity" in key:
-                specs["battery_capacity"] = float(value[:-4].split("-")[0])
-
-            elif "battery technology" in key:
-                specs["battery_tech"] = value
-
-            elif "average energy consumption" in key:
-                specs["electric_consumption"] = float(
-                    value.split(" kWh")[0].split("-")[0]
-                )
-
-            elif "electric range" in key:
-                specs["electric_range"] = float(
-                    value.split(" km")[0].split("-")[0].strip("<").strip(">")
-                )
-
-            elif "system power" in key:
-                power = value.split(" Hp")[0]
-                if "+" in power:
-                    power = sum([int(p) for p in power.split("+")])
-                specs["power"] = int(power)
-
-            elif "system torque" in key:
-                specs["torque"] = int(value.split(" ")[0])
-
-            elif "emission standard" in key:
-                specs["emission_standard"] = value[:-1]
-
-            elif "engine displacement" in key:
-                specs["displacement"] = int(value.split(" cm3")[0])
-
-            elif "power" == key.strip(" "):
-                power_no_system = int(value.split(" Hp ")[0])
-
-            elif "number of gears" in key or "type of gearbox" in key:
-                if "automatic" in value:
-                    specs["transmission"] = "automatic"
-                elif "manual" in value:
-                    specs["transmission"] = "manual"
-
-                if "gears" in value:
-                    specs["gears"] = value.split(" gears")[0]
-
-            elif "drive wheel" in key:
-                if "Front" in value:
-                    specs["traction"] = "front"
-                elif "Rear" in value:
-                    specs["traction"] = "rear"
-                elif "All wheel drive" in value:
-                    specs["traction"] = "4wd"
-
-            elif "kerb weight" in key:
-                specs["weight"] = int(
-                    float(value.split(" kg")[0].split("-")[0].split("/")[-1])
-                )
-
-            elif "length" == key.strip(" "):
-                specs["length"] = int(
-                    float(value.split(" mm")[0].split("-")[0].split("/")[-1])
-                )
-
-            elif "width" == key.strip(" "):
-                specs["width"] = int(
-                    float(value.split(" mm")[0].split("-")[0].split("/")[-1])
-                )
-
-            elif "height" == key.strip(" "):
-                specs["height"] = int(
-                    float(value.split(" mm")[0].split("-")[0].split("/")[-1])
-                )
-
-            elif "wheelbase" == key.strip(" "):
-                specs["wheelbase"] = int(
-                    float(value.split(" mm")[0].split("-")[0].split("/")[-1])
-                )
-
-            elif "clearance" in key:
-                specs["clearance"] = int(
-                    float(value.split(" mm")[0].split("-")[0].split("/")[-1])
-                )
-
-            elif "tires" in key:
-                specs["tires"] = value.split("; ")
-
         # phase 2
-        if not "power" in specs or not specs["power"]:
+        if "power" not in specs or not specs["power"]:
             specs["power"] = power_no_system
 
         if "powertrain_architecture" in specs and specs["powertrain_architecture"]:
@@ -381,7 +438,8 @@ class ADNET:
                 elif specs["fuel_type"] == "diesel":
                     specs["fuel_type"] = "hybrid diesel"
             elif (
-                "internal combustion engine" in specs["powertrain_architecture"].lower()
+                "internal combustion engine"
+                in specs["powertrain_architecture"].lower()
             ):
                 specs["powertrain_architecture"] = "ICE"
             elif "FCEV" in specs["powertrain_architecture"]:
@@ -426,17 +484,28 @@ class ADNET:
             elif "van" in body_type:
                 specs["body_type"] = "van"
             else:
-                print(specs["body_type"])
+                logging.warning(f"Unknown body type: {specs['body_type']}")
                 specs["body_type"] = "other"
 
-        for k, v in specs.items():
-            if v is not None and v != "null":
-                self.indexed[self._current_make][self._current_model][
-                    self._current_generation
-                ][self._current_variant]["specs"][k] = v
+        if not specs:
+            logging.warning(f"No specs parsed for {variant_name} at {link}")
+            return
 
-    def _write_json(
-        self,
-    ):
-        with open(self._output_file, "w") as f:
-            json.dump(self.indexed, f, indent=2)
+        with self._lock:
+            variant_data = self.indexed[make_name][model_name][gen_name][variant_name]
+            for k, v in specs.items():
+                if v is not None and v != "null":
+                    variant_data["specs"][k] = v
+
+    def _write_json(self):
+        dir_name = os.path.dirname(self._output_file) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+        try:
+            with self._lock:
+                data = json.dumps(self.indexed, indent=2)
+            with os.fdopen(fd, "w") as f:
+                f.write(data)
+            os.replace(tmp_path, self._output_file)
+        except Exception:
+            os.unlink(tmp_path)
+            raise

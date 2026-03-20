@@ -1,12 +1,11 @@
+import logging
+
 from aevs import AEVS
 from adnet import ADNET
 
-# if __name__ == "__main__":
-    # scraper = AEVS()
-    # scraper.scrape()
-    # scraper._dispose()
-
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s: %(message)s")
+
     only_include_makes = [
         "Abarth",
         "Acura",
@@ -66,14 +65,10 @@ if __name__ == "__main__":
     ]
 
     scraper = ADNET(
-        'last-autodata-extended-full.json',
+        "last-autodata-extended-full.json",
         True,
+        only_include_makes=only_include_makes,
+        max_workers=4,
     )
-
-    # scraper = ADNET(
-    #     'last-autodata-extended.json',
-    #     True,
-    #     only_include_makes=only_include_makes
-    # )
 
     scraper.scrape()
